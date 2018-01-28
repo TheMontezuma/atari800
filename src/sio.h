@@ -13,7 +13,8 @@ typedef enum SIO_tagUnitStatus {
 	SIO_OFF,
 	SIO_NO_DISK,
 	SIO_READ_ONLY,
-	SIO_READ_WRITE
+	SIO_READ_WRITE,
+	SIO_OVER_SERIAL
 } SIO_UnitStatus;
 
 extern char SIO_status[256];

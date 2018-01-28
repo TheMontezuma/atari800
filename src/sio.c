@@ -29,6 +29,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <termios.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 
 #include "afile.h"
 #include "antic.h"  /* ANTIC_ypos */
@@ -178,6 +181,14 @@ static int ExpectedBytes = 0;
 
 int ignore_header_writeprotect = FALSE;
 
+/* private functions and variables for SIO over serial */
+static int SIO_Serial_Open(const char *filename);
+static void SIO_Serial_Close(void);
+static int SIO_Serial_CommandLine(int onoff);
+static int SIO_Serial_Read(void *buf, size_t nbytes);
+static int SIO_Serial_Write(const void *buf, size_t nbytes);
+static int sio_serial_fd = -1;
+
 int SIO_Initialise(int *argc, char *argv[])
 {
 	int i;
@@ -212,6 +223,21 @@ int SIO_Mount(int diskno, const char *filename, int b_open_readonly)
 
 	/* release previous disk */
 	SIO_Dismount(diskno);
+	
+	/* check if it is a serial device */
+	if(strncmp(filename,"/dev/tty",8)==0)
+	{
+		if((1==diskno) && SIO_Serial_Open(filename))
+		{
+			strcpy(SIO_filename[diskno - 1], filename);
+			SIO_drive_status[diskno - 1] = SIO_OVER_SERIAL;
+			return TRUE;
+		}
+		else
+		{
+			return FALSE;
+		}
+	}
 
 	/* open file */
 	if (!b_open_readonly)
@@ -553,6 +579,13 @@ int SIO_Mount(int diskno, const char *filename, int b_open_readonly)
 
 void SIO_Dismount(int diskno)
 {
+	if((1==diskno) && (sio_serial_fd != -1))
+	{
+		SIO_Serial_Close();
+		SIO_drive_status[diskno - 1] = SIO_NO_DISK;
+		strcpy(SIO_filename[diskno - 1], "Empty");
+	}
+	
 	if (disk[diskno - 1] != NULL) {
 		Util_fclose(disk[diskno - 1], sio_tmpbuf[diskno - 1]);
 		disk[diskno - 1] = NULL;
@@ -1139,7 +1172,51 @@ void SIO_Handler(void)
 	/* Disk 1 is ASCII '1' = 0x31 etc */
 	/* Disk 1 -> unit = 0 */
 	unit -= 0x31;
-
+	
+	if(unit < SIO_MAX_DRIVES && (SIO_OVER_SERIAL == SIO_drive_status[unit]))
+	{
+		/* support only for ATARI 1050 command subset */
+		switch (cmd)
+		{
+			case 0x22:  /* Format ED */
+				break;
+			case 0x21:  /* Format */
+				break;
+			case 0x50:  /* Write sector and verify */
+			case 0x57:  /* Write sector without verifying */
+				break;
+			case 0x52:  /* Read sector */
+				DataBuffer[0] = unit + 0x31;
+				DataBuffer[1] = cmd;
+				DataBuffer[2] = MEMORY_dGetByte(0x30a);
+				DataBuffer[3] = MEMORY_dGetByte(0x30b);
+				DataBuffer[4] = SIO_ChkSum(DataBuffer, 4);
+				SIO_Serial_CommandLine(TRUE);
+				SIO_Serial_Write(DataBuffer,5);
+				SIO_Serial_CommandLine(FALSE);
+				SIO_Serial_Read(DataBuffer,131);
+				MEMORY_CopyToMem(DataBuffer+2, data, 128);
+				result = 'C';
+				break;
+			case 0x53:  /* Get status */
+				DataBuffer[0] = unit + 0x31;
+				DataBuffer[1] = cmd;
+				DataBuffer[2] = MEMORY_dGetByte(0x30a);
+				DataBuffer[3] = MEMORY_dGetByte(0x30b);
+				DataBuffer[4] = SIO_ChkSum(DataBuffer, 4);
+				SIO_Serial_CommandLine(TRUE);
+				SIO_Serial_Write(DataBuffer,5);
+				SIO_Serial_CommandLine(FALSE);
+				SIO_Serial_Read(DataBuffer,7);
+				MEMORY_CopyToMem(DataBuffer+2, data, 4);
+				result = 'C';
+				break;
+			default:
+				result = 'N';
+				break;
+		}
+	}
+	else
 	if (MEMORY_dGetByte(0x300) != 0x60 && unit < SIO_MAX_DRIVES && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {	/* UBYTE range ! */
 #ifdef DEBUG
 		Log_print("SIO disk command is %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x",
@@ -1490,6 +1567,10 @@ static UBYTE Command_Frame(void)
 /* Enable/disable the command frame */
 void SIO_SwitchCommandFrame(int onoff)
 {
+	if(-1 != sio_serial_fd)
+	{
+		SIO_Serial_CommandLine(onoff);
+	}
 	if (onoff) {				/* Enabled */
 		if (TransferStatus != SIO_NoFrame)
 			Log_print("Unexpected command frame at state %x.", TransferStatus);
@@ -1534,6 +1615,8 @@ static UBYTE WriteSectorBack(void)
 /* Put a byte that comes out of POKEY. So get it here... */
 void SIO_PutByte(int byte)
 {
+	unsigned char byte2send = byte;
+	
 	switch (TransferStatus) {
 	case SIO_CommandFrame:
 		if (CommandIndex < ExpectedBytes) {
@@ -1586,6 +1669,9 @@ void SIO_PutByte(int byte)
 	}
 	CASSETTE_PutByte(byte);
 	/* POKEY_DELAYED_SEROUT_IRQ = SIO_SEROUT_INTERVAL; */ /* already set in pokey.c */
+	
+	SIO_Serial_Write(&byte2send, 1);
+	POKEY_DELAYED_SERIN_IRQ = 100;
 }
 
 /* Get a byte from the floppy to the pokey. */
@@ -1639,6 +1725,13 @@ int SIO_GetByte(void)
 	default:
 		byte = CASSETTE_GetByte();
 		break;
+	}
+	if(-1!=sio_serial_fd)
+	{
+		unsigned char byte2read;
+		SIO_Serial_Read(&byte2read,1);
+		byte = byte2read;
+		POKEY_DELAYED_SERIN_IRQ = 100;
 	}
 	return byte;
 }
@@ -1716,6 +1809,115 @@ void SIO_StateRead(void)
 			break;
 		}
 	}
+}
+
+static int SIO_Serial_Open(const char *filename)
+{
+	int status;
+    struct termios tios;
+	if (sio_serial_fd != -1)
+	{
+		SIO_Serial_Close();
+	}
+	if( -1 == (sio_serial_fd = open(filename, O_RDWR | O_NOCTTY | O_NDELAY)) )
+	{
+		return FALSE;
+	}
+    if (ioctl(sio_serial_fd, TIOCMGET, &status) == -1)
+	{
+        return FALSE;
+    }
+    status &= ~TIOCM_RTS;
+    if (ioctl(sio_serial_fd, TIOCMSET, &status) == -1)
+	{
+        return FALSE;
+    }
+    tcgetattr(sio_serial_fd, &tios);
+    tios.c_cflag &= ~CSTOPB;
+    cfmakeraw(&tios);
+	cfsetispeed(&tios, B19200);
+	cfsetospeed(&tios, B19200);
+    if (tcsetattr(sio_serial_fd, TCSANOW, &tios) != 0)
+	{
+        return FALSE;
+    }
+	return TRUE;
+}
+
+static void SIO_Serial_Close(void)
+{
+	close(sio_serial_fd);
+	sio_serial_fd = -1;
+}
+
+static int SIO_Serial_CommandLine(int onoff)
+{
+	int status;
+    if (ioctl(sio_serial_fd, TIOCMGET, &status) == -1)
+	{
+        return FALSE;
+    }
+	if(onoff)
+	{
+		status |= TIOCM_RTS;
+	}
+	else
+	{
+		status &= ~TIOCM_RTS;
+	}
+    if (ioctl(sio_serial_fd, TIOCMSET, &status) == -1)
+	{
+        return FALSE;
+    }
+	return TRUE;
+}
+
+static int SIO_Serial_Read(void *buf, size_t nbytes)
+{
+    int result;
+    uint total = 0;
+	int rest = nbytes;
+	
+	if(-1 == sio_serial_fd)
+	{
+		return FALSE;
+	}
+
+    do {
+        result = read(sio_serial_fd, (unsigned char*)buf + total, rest);
+        if (result < 0)
+		{
+            return FALSE;
+        }
+        total += result;
+        rest -= result;
+    } while (total < nbytes);
+
+	return TRUE;
+}
+
+static int SIO_Serial_Write(const void *buf, size_t nbytes)
+{
+    int result;
+    unsigned int total = 0;
+    int rest = nbytes;
+	
+	if(-1 == sio_serial_fd)
+	{
+		return FALSE;
+	}
+	
+    do {
+        result = write(sio_serial_fd, (unsigned char*)buf + total, rest);
+        if (result < 0)
+		{
+            return FALSE;
+        }
+        total += result;
+        rest -= result;
+    } while (total < nbytes);
+
+	return TRUE;
 }
 
 #endif /* BASIC */
