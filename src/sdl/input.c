@@ -641,12 +641,12 @@ int PLATFORM_Keyboard(void)
 
 	/* OPTION / SELECT / START keys */
 	INPUT_key_consol = INPUT_CONSOL_NONE;
-	if (kbhits[SDLK_F2])
-		INPUT_key_consol &= ~INPUT_CONSOL_OPTION;
-	if (kbhits[SDLK_F3])
-		INPUT_key_consol &= ~INPUT_CONSOL_SELECT;
 	if (kbhits[SDLK_F4])
-		INPUT_key_consol &= ~INPUT_CONSOL_START;
+		INPUT_key_consol &= (~INPUT_CONSOL_OPTION);
+	if (kbhits[SDLK_F3])
+		INPUT_key_consol &= (~INPUT_CONSOL_SELECT);
+	if (kbhits[SDLK_F2])
+		INPUT_key_consol &= (~INPUT_CONSOL_START);
 
 	if (key_pressed == 0)
 		return AKEY_NONE;
@@ -659,6 +659,9 @@ int PLATFORM_Keyboard(void)
 	case SDLK_F5:
 		key_pressed = 0;
 		return INPUT_key_shift ? AKEY_COLDSTART : AKEY_WARMSTART;
+	case SDLK_F6:
+		key_pressed = 0;
+		return INPUT_key_shift ? AKEY_SCREENSHOT_INTERLACE : AKEY_SCREENSHOT;
 	case SDLK_F8:
 		UI_alt_function = UI_MENU_MONITOR;
 		break;
@@ -666,7 +669,7 @@ int PLATFORM_Keyboard(void)
 		return AKEY_EXIT;
 	case SDLK_F10:
 		key_pressed = 0;
-		return INPUT_key_shift ? AKEY_SCREENSHOT_INTERLACE : AKEY_SCREENSHOT;
+		return AKEY_COLDSTART;
 	case SDLK_F12:
 		key_pressed = 0;
 		return AKEY_TURBO;
@@ -760,6 +763,7 @@ int PLATFORM_Keyboard(void)
 		return key_control ? AKEY_LESS|shiftctrl : AKEY_CLEAR;
 	case SDLK_PAUSE:
 	case SDLK_F7:
+	case SDLK_PRINT:
 		if (BINLOAD_wait_active) {
 			BINLOAD_pause_loading = TRUE;
 			return AKEY_NONE;
